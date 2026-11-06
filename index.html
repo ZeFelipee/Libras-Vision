@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Libras para áudio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+<style>
+:root{--fundo:#E9EEF4;--tinta:#13202E;--suave:#5A6B7D;--cobalto:#2450E0;--ambar:#F5B301;--papel:#fff;--linha:#C9D3DF;color-scheme:light}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--fundo);color:var(--tinta);font-family:"Bricolage Grotesque",system-ui,sans-serif;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom));display:flex;justify-content:center}
+main{width:100%;max-width:560px;display:grid;gap:14px}
+h1{font-size:1.25rem;font-weight:800;margin:0}
+.sub{margin:2px 0 0;color:var(--suave);font-size:.95rem}
+.palco{position:relative;background:#0F1A26;border-radius:14px;overflow:hidden;min-height:240px}
+canvas{display:block;width:100%;height:auto}
+#ligar{position:absolute;inset:0;margin:auto;width:max-content;height:max-content}
+#status{position:absolute;left:12px;top:10px;right:12px;font-size:.85rem;color:#fff;text-shadow:0 1px 3px #000}
+.selo{position:absolute;left:12px;bottom:12px;width:96px;height:96px;display:none}
+.selo svg{position:absolute;inset:0;transform:rotate(-90deg)}
+.selo circle{fill:rgba(255,255,255,.94);stroke:var(--linha);stroke-width:6}
+.selo circle.prog{fill:none;stroke:var(--ambar);stroke-linecap:round;stroke-dasharray:276.46;stroke-dashoffset:276.46}
+#letra{position:absolute;inset:0;display:grid;place-items:center;font-size:3.2rem;font-weight:800}
+.texto{background:var(--papel);border:1px solid var(--linha);border-radius:14px;padding:14px 16px;min-height:78px;font-size:1.9rem;font-weight:600;letter-spacing:.04em;overflow-wrap:anywhere}
+.texto.vazio{font-size:1rem;font-weight:400;letter-spacing:0;color:var(--suave)}
+.botoes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+button{font:inherit;font-weight:600;border:1px solid var(--linha);background:var(--papel);color:var(--tinta);border-radius:12px;padding:14px 10px;cursor:pointer}
+button.principal{grid-column:1/-1;background:var(--cobalto);border-color:var(--cobalto);color:#fff;font-size:1.05rem}
+#ligar{background:var(--cobalto);border-color:var(--cobalto);color:#fff;padding:14px 22px}
+button:focus-visible{outline:3px solid var(--ambar);outline-offset:2px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Libras para áudio</h1>
+    <p class="sub">Faça o sinal de uma letra e segure por 2 segundos.</p>
+  </header>
+  <section class="palco">
+    <canvas id="tela" width="640" height="480"></canvas>
+    <div id="status"></div>
+    <button id="ligar" type="button">Ativar câmera</button>
+    <div class="selo" id="selo">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44"/><circle class="prog" id="prog" cx="50" cy="50" r="44"/></svg>
+      <div id="letra"></div>
+    </div>
+  </section>
+  <div class="texto vazio" id="texto" aria-live="polite">As letras confirmadas aparecem aqui.</div>
+  <div class="botoes">
+    <button class="principal" id="falar" type="button">Falar</button>
+    <button id="espaco" type="button">Espaço</button>
+    <button id="apagar" type="button">Apagar letra</button>
+    <button id="limpar" type="button">Limpar tudo</button>
+  </div>
+</main>
+
+<script type="module">
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const TEMPO_CONFIRMAR = 2000; // ms que a pose precisa ficar parada
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODELO_MAO = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+
+const $ = id => document.getElementById(id);
+const tela = $("tela"), ctx = tela.getContext("2d"), video = document.createElement("video");
+video.playsInline = true; video.muted = true;
+let texto = "", ultima = "", inicio = 0, detector, prever;
+
+// <svm> reimplementação do SVC (one-vs-one) do scikit-learn
+function criarSVM(m) {
+  const ini = []; let total = 0;
+  for (const n of m.n_support) { ini.push(total); total += n; }
+  const nc = m.classes.length;
+  const nucleo = (x, sv) => {
+    if (m.kernel === "rbf") { let d = 0; for (let i = 0; i < x.length; i++) { const t = x[i] - sv[i]; d += t * t; } return Math.exp(-m.gamma * d); }
+    let dot = 0; for (let i = 0; i < x.length; i++) dot += x[i] * sv[i];
+    if (m.kernel === "linear") return dot;
+    if (m.kernel === "poly") return Math.pow(m.gamma * dot + m.coef0, m.degree);
+    return Math.tanh(m.gamma * dot + m.coef0);
+  };
+  return x => {
+    if (m.scaler) x = x.map((v, i) => (v - m.scaler.mean[i]) / m.scaler.scale[i]);
+    const k = m.support_vectors.map(sv => nucleo(x, sv));
+    const votos = new Array(nc).fill(0); let p = 0;
+    for (let i = 0; i < nc; i++) for (let j = i + 1; j < nc; j++) {
+      let s = m.intercept[p++];
+      for (let a = ini[i]; a < ini[i] + m.n_support[i]; a++) s += m.dual_coef[j - 1][a] * k[a];
+      for (let a = ini[j]; a < ini[j] + m.n_support[j]; a++) s += m.dual_coef[i][a] * k[a];
+      votos[s > 0 ? i : j]++;
+    }
+    let melhor = 0; for (let c = 1; c < nc; c++) if (votos[c] > votos[melhor]) melhor = c;
+    return m.classes[melhor];
+  };
+}
+// </svm>
+
+// Mesma normalização do Python: pulso na origem, escala só por X e Y
+function normalizar(lm) {
+  const p0 = lm[0], pts = lm.map(l => [l.x - p0.x, l.y - p0.y, l.z - p0.z]);
+  let escala = 0; for (const p of pts) escala = Math.max(escala, Math.abs(p[0]), Math.abs(p[1]));
+  if (escala === 0) escala = 1;
+  return pts.flatMap(p => p.map(v => v / escala));
+}
+
+function mostrarTexto() {
+  const el = $("texto");
+  el.classList.toggle("vazio", !texto);
+  el.textContent = texto || "As letras confirmadas aparecem aqui.";
+}
+function falar() {
+  if (!texto.trim() || !("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(texto.toLowerCase()); u.lang = "pt-BR"; u.rate = 0.9;
+  speechSynthesis.speak(u);
+}
+$("falar").onclick = falar;
+$("espaco").onclick = () => { texto += " "; mostrarTexto(); };
+$("apagar").onclick = () => { texto = texto.slice(0, -1); mostrarTexto(); };
+$("limpar").onclick = () => { texto = ""; mostrarTexto(); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "BUTTON") return;
+  if (e.code === "Space") { e.preventDefault(); falar(); }
+  else if (e.key === "Backspace") { texto = texto.slice(0, -1); mostrarTexto(); }
+});
+
+function definirSelo(letra, progresso) {
+  $("selo").style.display = letra ? "block" : "none";
+  $("letra").textContent = letra || "";
+  $("prog").style.strokeDashoffset = 276.46 * (1 - progresso);
+}
+
+function quadro() {
+  if (video.readyState >= 2) {
+    // espelha o quadro ANTES de detectar, como o cv2.flip do script Python
+    ctx.save(); ctx.scale(-1, 1); ctx.drawImage(video, -tela.width, 0, tela.width, tela.height); ctx.restore();
+    const res = detector.detectForVideo(tela, performance.now());
+    let letra = null;
+    if (res.landmarks && res.landmarks.length) {
+      const lm = res.landmarks[0];
+      ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 2;
+      for (const c of HandLandmarker.HAND_CONNECTIONS || []) {
+        ctx.beginPath(); ctx.moveTo(lm[c.start].x * tela.width, lm[c.start].y * tela.height);
+        ctx.lineTo(lm[c.end].x * tela.width, lm[c.end].y * tela.height); ctx.stroke();
+      }
+      ctx.fillStyle = "#F5B301";
+      for (const p of lm) { ctx.beginPath(); ctx.arc(p.x * tela.width, p.y * tela.height, 4, 0, 7); ctx.fill(); }
+      letra = prever(normalizar(lm));
+    }
+    if (!letra) { ultima = ""; definirSelo(null, 0); }
+    else if (letra !== ultima) { ultima = letra; inicio = performance.now(); definirSelo(letra, 0); }
+    else {
+      const prog = Math.min((performance.now() - inicio) / TEMPO_CONFIRMAR, 1);
+      definirSelo(letra, prog);
+      if (prog >= 1) {
+        texto += letra; mostrarTexto();
+        navigator.vibrate?.(60);
+        ultima = ""; // recomeça a contagem, como no script Python
+      }
+    }
+  }
+  requestAnimationFrame(quadro);
+}
+
+async function iniciar() {
+  const status = $("status"), botao = $("ligar");
+  botao.disabled = true;
+  try {
+    if (!window.isSecureContext) throw new Error("A câmera só funciona em página HTTPS.");
+    status.textContent = "Carregando o modelo…";
+    prever = criarSVM(await (await fetch("modelo_libras.json")).json());
+    const arquivos = await FilesetResolver.forVisionTasks(WASM);
+    const opcoes = delegate => ({ baseOptions: { modelAssetPath: MODELO_MAO, delegate }, runningMode: "VIDEO", numHands: 1 });
+    try { detector = await HandLandmarker.createFromOptions(arquivos, opcoes("GPU")); }
+    catch { detector = await HandLandmarker.createFromOptions(arquivos, opcoes("CPU")); }
+    status.textContent = "Abrindo a câmera…";
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+    await video.play();
+    tela.width = video.videoWidth; tela.height = video.videoHeight;
+    botao.remove(); status.textContent = "";
+    quadro();
+  } catch (e) {
+    botao.disabled = false; botao.textContent = "Tentar de novo";
+    status.textContent = e.name === "NotAllowedError" ? "Permita o uso da câmera para continuar." : "Erro: " + e.message;
+  }
+}
+$("ligar").onclick = iniciar;
+</script>
+</body>
+</html>
