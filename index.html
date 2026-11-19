@@ -4,9 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Libras para áudio</title>
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#2450E0">
-<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
@@ -40,7 +37,7 @@ button:focus-visible{outline:3px solid var(--ambar);outline-offset:2px}
 <main>
   <header>
     <h1>Libras para áudio</h1>
-    <p class="sub">Faça o sinal de uma letra e segure por 2 segundos.</p>
+    <p class="sub">Faça o sinal de uma letra e segure por 2 segundos. Nas letras com movimento, faça a pose e comece a mover a mão.</p>
   </header>
   <section class="palco">
     <canvas id="tela" width="640" height="480"></canvas>
@@ -71,6 +68,14 @@ const $ = id => document.getElementById(id);
 const tela = $("tela"), ctx = tela.getContext("2d"), video = document.createElement("video");
 video.playsInline = true; video.muted = true;
 let texto = "", ultima = "", inicio = 0, detector, prever;
+
+// ---- letras com movimento (J, Z, K...): parâmetros e templates vêm de arquivos JSON ----
+const PADRAO = { limDtw: .15, limVel: .012, parado: .45, janelaPose: .6, pausaDinamica: 1, pausaDescarte: .5,
+                 minPontos: 10, nPontos: 30, dinamicas: {}, pontos: {}, soDinamicas: [] };
+const PERDA_MAX = 400; // ms sem enxergar a mão antes de encerrar a gravação
+let CFG = PADRAO, TEMPLATES = {};
+let modo = "estatico", trajs = {}, anterior = null, ultimoMov = 0, ultimoIdx = 1, ultimoVisto = 0;
+let poseDin = null, tPose = 0, pausaAte = 0, aviso = "", tAviso = 0, statusAtual = "";
 
 // <svm> reimplementação do SVC (one-vs-one) do scikit-learn
 function criarSVM(m) {
@@ -135,14 +140,62 @@ function definirSelo(letra, progresso) {
   $("prog").style.strokeDashoffset = 276.46 * (1 - progresso);
 }
 
+const temTemplates = pose => (CFG.dinamicas[pose] || []).some(l => TEMPLATES[l]);
+
+// mesma normalização e mesmo DTW do script Python
+function normTraj(traj, n) {
+  const [x0, y0] = traj[0], t = traj.map(p => [p[0] - x0, p[1] - y0]);
+  let m = 1e-6; for (const p of t) m = Math.max(m, Math.abs(p[0]) + 1e-6, Math.abs(p[1]) + 1e-6);
+  const out = [];
+  for (let i = 0; i < n; i++) { const p = t[Math.floor(i * (t.length - 1) / (n - 1))]; out.push([p[0] / m, p[1] / m]); }
+  return out;
+}
+function dtw(a, b) {
+  const n = a.length, m = b.length, W = m + 1, d = new Float64Array((n + 1) * W).fill(Infinity);
+  d[0] = 0;
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+    const c = Math.hypot(a[i - 1][0] - b[j - 1][0], a[i - 1][1] - b[j - 1][1]);
+    d[i * W + j] = c + Math.min(d[(i - 1) * W + j], d[i * W + j - 1], d[(i - 1) * W + j - 1]);
+  }
+  return d[n * W + m] / (n + m);
+}
+function avaliar(pose) {
+  const dists = {};
+  for (const l of CFG.dinamicas[pose]) {
+    if (!TEMPLATES[l]) continue;
+    const tr = trajs[l].slice(0, ultimoIdx);
+    if (tr.length < CFG.minPontos) continue;
+    const t = normTraj(tr, CFG.nPontos);
+    dists[l] = Math.min(...TEMPLATES[l].map(m => dtw(t, m)));
+  }
+  const ks = Object.keys(dists);
+  if (!ks.length) return { letra: null, dists };
+  const melhor = ks.reduce((a, b) => dists[a] <= dists[b] ? a : b);
+  return { letra: dists[melhor] < CFG.limDtw ? melhor : null, dists };
+}
+function fimGravacao(agora) {
+  const { letra, dists } = avaliar(poseDin);
+  const v = Object.values(dists), dtxt = v.length ? Math.min(...v).toFixed(3) : "curto demais";
+  console.log("movimento", poseDin, dists);
+  if (letra) {
+    texto += letra; mostrarTexto(); navigator.vibrate?.(60);
+    aviso = "Letra " + letra + " (" + dtxt + ")"; pausaAte = agora + CFG.pausaDinamica * 1000;
+  } else {
+    aviso = "Movimento não reconhecido (" + dtxt + ")"; pausaAte = agora + CFG.pausaDescarte * 1000;
+  }
+  tAviso = agora; modo = "estatico"; poseDin = null; trajs = {}; ultima = "";
+}
+
 function quadro() {
   if (video.readyState >= 2) {
     // espelha o quadro ANTES de detectar, como o cv2.flip do script Python
     ctx.save(); ctx.scale(-1, 1); ctx.drawImage(video, -tela.width, 0, tela.width, tela.height); ctx.restore();
     const res = detector.detectForVideo(tela, performance.now());
-    let letra = null;
+    const agora = performance.now();
+    let letra = null, terminou = false;
     if (res.landmarks && res.landmarks.length) {
       const lm = res.landmarks[0];
+      ultimoVisto = agora;
       ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 2;
       for (const c of HandLandmarker.HAND_CONNECTIONS || []) {
         ctx.beginPath(); ctx.moveTo(lm[c.start].x * tela.width, lm[c.start].y * tela.height);
@@ -150,19 +203,56 @@ function quadro() {
       }
       ctx.fillStyle = "#F5B301";
       for (const p of lm) { ctx.beginPath(); ctx.arc(p.x * tela.width, p.y * tela.height, 4, 0, 7); ctx.fill(); }
-      letra = prever(normalizar(lm));
-    }
-    if (!letra) { ultima = ""; definirSelo(null, 0); }
-    else if (letra !== ultima) { ultima = letra; inicio = performance.now(); definirSelo(letra, 0); }
+
+      const atual = {}; let vel = 0;
+      for (const l in CFG.pontos) atual[l] = [lm[CFG.pontos[l]].x, lm[CFG.pontos[l]].y];
+      if (anterior) for (const l in atual) vel = Math.max(vel, Math.hypot(atual[l][0] - anterior[l][0], atual[l][1] - anterior[l][1]));
+
+      if (modo === "estatico") {
+        letra = prever(normalizar(lm));
+        if (letra && temTemplates(letra)) { poseDin = letra; tPose = agora; } // pose que pode iniciar um movimento
+        if (poseDin && agora - tPose < CFG.janelaPose * 1000 && vel > CFG.limVel && agora >= pausaAte && anterior) {
+          modo = "gravando"; trajs = {};
+          for (const l in atual) trajs[l] = [anterior[l]];
+          ultimoMov = agora; ultimoIdx = 1; letra = null;
+        }
+      } else {
+        for (const l in atual) trajs[l].push(atual[l]);
+        if (vel > CFG.limVel) { ultimoMov = agora; ultimoIdx = trajs[Object.keys(trajs)[0]].length; }
+        if (agora - ultimoMov > CFG.parado * 1000) terminou = true;
+      }
+      anterior = atual;
+    } else if (modo === "gravando") {
+      if (agora - ultimoVisto > PERDA_MAX) terminou = true; // tolera uma falha curta de rastreamento
+    } else anterior = null;
+
+    if (terminou) fimGravacao(agora);
+
+    // cronômetro de 2 s só para letras estáticas, fora de gravação e fora da pausa
+    let letraTimer = letra, dica = "";
+    if (modo !== "estatico" || agora < pausaAte) letraTimer = null;
+    else if (letra && CFG.soDinamicas.includes(letra) && temTemplates(letra)) { letraTimer = null; dica = letra + ": faça o movimento"; }
+
+    if (!letraTimer) { ultima = ""; definirSelo(null, 0); }
+    else if (letraTimer !== ultima) { ultima = letraTimer; inicio = performance.now(); definirSelo(letraTimer, 0); }
     else {
       const prog = Math.min((performance.now() - inicio) / TEMPO_CONFIRMAR, 1);
-      definirSelo(letra, prog);
+      definirSelo(letraTimer, prog);
       if (prog >= 1) {
-        texto += letra; mostrarTexto();
+        texto += letraTimer; mostrarTexto();
         navigator.vibrate?.(60);
         ultima = ""; // recomeça a contagem, como no script Python
       }
     }
+
+    if (modo === "gravando" && poseDin) { // traço do movimento em andamento
+      const tr = trajs[CFG.dinamicas[poseDin][0]];
+      ctx.strokeStyle = "#F5B301"; ctx.lineWidth = 4; ctx.beginPath();
+      tr.forEach((p, i) => i ? ctx.lineTo(p[0] * tela.width, p[1] * tela.height) : ctx.moveTo(p[0] * tela.width, p[1] * tela.height));
+      ctx.stroke();
+    }
+    const st = modo === "gravando" ? "Gravando o movimento…" : (dica || (agora - tAviso < 2000 ? aviso : ""));
+    if (st !== statusAtual) { $("status").textContent = st; statusAtual = st; }
   }
   requestAnimationFrame(quadro);
 }
@@ -174,6 +264,11 @@ async function iniciar() {
     if (!window.isSecureContext) throw new Error("A câmera só funciona em página HTTPS.");
     status.textContent = "Carregando o modelo…";
     prever = criarSVM(await (await fetch("modelo_libras.json")).json());
+    try {
+      CFG = { ...PADRAO, ...(await (await fetch("config_dinamicas.json")).json()) };
+      const t = await (await fetch("templates_dinamicos.json")).json();
+      for (const k in t) if (t[k].length) TEMPLATES[k] = t[k]; // ignora letras sem exemplos
+    } catch { CFG = PADRAO; TEMPLATES = {}; } // sem os arquivos, só as letras estáticas funcionam
     const arquivos = await FilesetResolver.forVisionTasks(WASM);
     const opcoes = delegate => ({ baseOptions: { modelAssetPath: MODELO_MAO, delegate }, runningMode: "VIDEO", numHands: 1 });
     try { detector = await HandLandmarker.createFromOptions(arquivos, opcoes("GPU")); }
@@ -190,7 +285,6 @@ async function iniciar() {
   }
 }
 $("ligar").onclick = iniciar;
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 </body>
 </html>

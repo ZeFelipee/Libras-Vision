@@ -1,8 +1,8 @@
 // Service worker: permite instalar o app e usar offline depois da primeira abertura.
-const CACHE = "libras-v1";
+const CACHE = "libras-v2";
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(["./", "index.html", "modelo_libras.json", "manifest.json", "icon-192.png", "icon-512.png"])));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(["./", "index.html", "modelo_libras.json", "config_dinamicas.json", "templates_dinamicos.json", "manifest.json", "icon-192.png", "icon-512.png"])));
   self.skipWaiting();
 });
 

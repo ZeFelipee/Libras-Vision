@@ -1,0 +1,37 @@
+{
+  "limDtw": 0.15,
+  "limVel": 0.012,
+  "parado": 0.45,
+  "janelaPose": 0.6,
+  "pausaDinamica": 1.0,
+  "pausaDescarte": 0.5,
+  "minPontos": 10,
+  "nPontos": 30,
+  "dinamicas": {
+    "I": [
+      "J"
+    ],
+    "D": [
+      "Z",
+      "X"
+    ],
+    "C": [
+      "Ç"
+    ],
+    "K": [
+      "K"
+    ]
+  },
+  "pontos": {
+    "Z": 8,
+    "J": 20,
+    "X": 8,
+    "H": 12,
+    "Ç": 9,
+    "K": 9,
+    "Y": 0
+  },
+  "soDinamicas": [
+    "K"
+  ]
+}
