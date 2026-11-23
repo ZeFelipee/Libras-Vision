@@ -1,5 +1,5 @@
 // Service worker: permite instalar o app e usar offline depois da primeira abertura.
-const CACHE = "libras-v2";
+const CACHE = "libras-v3";
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(["./", "index.html", "modelo_libras.json", "config_dinamicas.json", "templates_dinamicos.json", "manifest.json", "icon-192.png", "icon-512.png"])));
@@ -16,7 +16,7 @@ self.addEventListener("fetch", e => {
   const mesmaOrigem = new URL(e.request.url).origin === location.origin;
   if (mesmaOrigem) {
     // arquivos do app: tenta a rede (pega modelo novo) e cai no cache se estiver offline
-    e.respondWith(fetch(e.request).then(r => { const c = r.clone(); caches.open(CACHE).then(x => x.put(e.request, c)); return r; }).catch(() => caches.match(e.request)));
+    e.respondWith(fetch(e.request, { cache: "no-cache" }).then(r => { const c = r.clone(); caches.open(CACHE).then(x => x.put(e.request, c)); return r; }).catch(() => caches.match(e.request)));
   } else {
     // MediaPipe, modelo da mão e fontes: cache primeiro
     e.respondWith(caches.match(e.request).then(h => h || fetch(e.request).then(r => { const c = r.clone(); caches.open(CACHE).then(x => x.put(e.request, c)); return r; })));
