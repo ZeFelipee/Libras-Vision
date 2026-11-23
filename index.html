@@ -18,12 +18,17 @@ h1{font-size:1.25rem;font-weight:800;margin:0}
 .palco{position:relative;background:#0F1A26;border-radius:14px;overflow:hidden;min-height:240px}
 canvas{display:block;width:100%;height:auto}
 #ligar{position:absolute;inset:0;margin:auto;width:max-content;height:max-content}
-#status{position:absolute;left:12px;top:10px;right:12px;font-size:.85rem;color:#fff;text-shadow:0 1px 3px #000}
+#status{position:absolute;left:12px;top:10px;right:80px;font-size:.85rem;color:#fff;text-shadow:0 1px 3px #000}
 .selo{position:absolute;left:12px;bottom:12px;width:96px;height:96px;display:none}
 .selo svg{position:absolute;inset:0;transform:rotate(-90deg)}
 .selo circle{fill:rgba(255,255,255,.94);stroke:var(--linha);stroke-width:6}
 .selo circle.prog{fill:none;stroke:var(--ambar);stroke-linecap:round;stroke-dasharray:276.46;stroke-dashoffset:276.46}
 #letra{position:absolute;inset:0;display:grid;place-items:center;font-size:3.2rem;font-weight:800}
+.conf{position:absolute;left:104px;bottom:6px;white-space:nowrap;background:rgba(255,255,255,.94);border:1px solid var(--linha);border-radius:999px;padding:3px 10px;font-size:.78rem;font-weight:600}
+.conf:empty{display:none}
+.conf.baixa{color:#9A5200;border-color:var(--ambar)}
+#btnMetricas{position:absolute;right:10px;top:8px;padding:6px 12px;font-size:.78rem;border-radius:999px;background:rgba(255,255,255,.92)}
+#metricas{position:absolute;right:10px;top:44px;display:none;font-size:.74rem;line-height:1.45;color:#fff;background:rgba(15,26,38,.78);padding:8px 10px;border-radius:10px;text-align:right;font-variant-numeric:tabular-nums}
 .texto{background:var(--papel);border:1px solid var(--linha);border-radius:14px;padding:14px 16px;min-height:78px;font-size:1.9rem;font-weight:600;letter-spacing:.04em;overflow-wrap:anywhere}
 .texto.vazio{font-size:1rem;font-weight:400;letter-spacing:0;color:var(--suave)}
 .botoes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
@@ -42,10 +47,13 @@ button:focus-visible{outline:3px solid var(--ambar);outline-offset:2px}
   <section class="palco">
     <canvas id="tela" width="640" height="480"></canvas>
     <div id="status"></div>
+    <button id="btnMetricas" type="button" aria-pressed="false">Dados</button>
+    <div id="metricas"></div>
     <button id="ligar" type="button">Ativar câmera</button>
     <div class="selo" id="selo">
       <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44"/><circle class="prog" id="prog" cx="50" cy="50" r="44"/></svg>
       <div id="letra"></div>
+      <div class="conf" id="conf"></div>
     </div>
   </section>
   <div class="texto vazio" id="texto" aria-live="polite">As letras confirmadas aparecem aqui.</div>
@@ -74,6 +82,7 @@ const PADRAO = { limDtw: .15, limVel: .012, parado: .45, janelaPose: .6, pausaDi
                  minPontos: 10, nPontos: 30, dinamicas: {}, pontos: {}, soDinamicas: [] };
 const PERDA_MAX = 400; // ms sem enxergar a mão antes de encerrar a gravação
 let CFG = PADRAO, TEMPLATES = {};
+let confianca = 0, confTxt = "", fps = 0, msMao = 0, msSvm = 0, delegado = "", infoCamera = "", mostrarMetricas = false, nQuadros = 0, tFps = performance.now();
 let modo = "estatico", trajs = {}, anterior = null, ultimoMov = 0, ultimoIdx = 1, ultimoVisto = 0;
 let poseParada = null, paradoDesde = 0;
 let poseDin = null, tPose = 0, pausaAte = 0, aviso = "", tAviso = 0, statusAtual = "";
@@ -93,14 +102,17 @@ function criarSVM(m) {
   return x => {
     if (m.scaler) x = x.map((v, i) => (v - m.scaler.mean[i]) / m.scaler.scale[i]);
     const k = m.support_vectors.map(sv => nucleo(x, sv));
-    const votos = new Array(nc).fill(0); let p = 0;
+    const votos = new Array(nc).fill(0), duelos = []; let p = 0;
     for (let i = 0; i < nc; i++) for (let j = i + 1; j < nc; j++) {
       let s = m.intercept[p++];
       for (let a = ini[i]; a < ini[i] + m.n_support[i]; a++) s += m.dual_coef[j - 1][a] * k[a];
       for (let a = ini[j]; a < ini[j] + m.n_support[j]; a++) s += m.dual_coef[i][a] * k[a];
-      votos[s > 0 ? i : j]++;
+      votos[s > 0 ? i : j]++; duelos.push([i, j, s]);
     }
     let melhor = 0; for (let c = 1; c < nc; c++) if (votos[c] > votos[melhor]) melhor = c;
+    let folga = 1; // quão folgada foi a vitória no duelo mais apertado da letra escolhida
+    for (const [i, j, s] of duelos) { if (i === melhor) folga = Math.min(folga, s); else if (j === melhor) folga = Math.min(folga, -s); }
+    confianca = Math.max(0, Math.min(1, folga));
     return m.classes[melhor];
   };
 }
@@ -125,6 +137,16 @@ function falar() {
   const u = new SpeechSynthesisUtterance(texto.toLowerCase()); u.lang = "pt-BR"; u.rate = 0.9;
   speechSynthesis.speak(u);
 }
+function atualizarMetricas() {
+  $("metricas").innerHTML = "FPS " + fps.toFixed(0) + "<br>Mão " + msMao.toFixed(1) + " ms · SVM " + msSvm.toFixed(1) + " ms<br>"
+    + (infoCamera || "câmera desligada") + (delegado ? " · " + delegado : "") + "<br>Modo: " + (modo === "gravando" ? "gravando movimento" : "estático");
+}
+$("btnMetricas").onclick = () => {
+  mostrarMetricas = !mostrarMetricas;
+  $("metricas").style.display = mostrarMetricas ? "block" : "none";
+  $("btnMetricas").setAttribute("aria-pressed", mostrarMetricas);
+  atualizarMetricas();
+};
 $("falar").onclick = falar;
 $("espaco").onclick = () => { texto += " "; mostrarTexto(); };
 $("apagar").onclick = () => { texto = texto.slice(0, -1); mostrarTexto(); };
@@ -138,6 +160,9 @@ document.addEventListener("keydown", e => {
 function definirSelo(letra, progresso) {
   $("selo").style.display = letra ? "block" : "none";
   $("letra").textContent = letra || "";
+  const t = letra ? "Confiança " + Math.round(confianca * 100) + "%" : "";
+  if (t !== confTxt) { $("conf").textContent = t; confTxt = t; }
+  $("conf").classList.toggle("baixa", confianca < .5);
   $("prog").style.strokeDashoffset = 276.46 * (1 - progresso);
 }
 
@@ -191,8 +216,12 @@ function quadro() {
   if (video.readyState >= 2) {
     // espelha o quadro ANTES de detectar, como o cv2.flip do script Python
     ctx.save(); ctx.scale(-1, 1); ctx.drawImage(video, -tela.width, 0, tela.width, tela.height); ctx.restore();
-    const res = detector.detectForVideo(tela, performance.now());
+    const t0 = performance.now();
+    const res = detector.detectForVideo(tela, t0);
     const agora = performance.now();
+    msMao = msMao * .9 + (agora - t0) * .1;
+    nQuadros++;
+    if (agora - tFps >= 500) { fps = nQuadros * 1000 / (agora - tFps); nQuadros = 0; tFps = agora; if (mostrarMetricas) atualizarMetricas(); }
     let letra = null, terminou = false;
     if (res.landmarks && res.landmarks.length) {
       const lm = res.landmarks[0];
@@ -210,7 +239,9 @@ function quadro() {
       if (anterior) for (const l in atual) vel = Math.max(vel, Math.hypot(atual[l][0] - anterior[l][0], atual[l][1] - anterior[l][1]));
 
       if (modo === "estatico") {
+        const t1 = performance.now();
         letra = prever(normalizar(lm));
+        msSvm = msSvm * .9 + (performance.now() - t1) * .1;
         // a pose só "arma" o movimento depois de a mão ficar quase parada nela por um instante;
         // assim a mão passando por uma pose enquanto troca de sinal não dispara letra dinâmica
         if (letra && temTemplates(letra)) {
@@ -281,12 +312,14 @@ async function iniciar() {
     } catch { CFG = PADRAO; TEMPLATES = {}; } // sem os arquivos, só as letras estáticas funcionam
     const arquivos = await FilesetResolver.forVisionTasks(WASM);
     const opcoes = delegate => ({ baseOptions: { modelAssetPath: MODELO_MAO, delegate }, runningMode: "VIDEO", numHands: 1 });
-    try { detector = await HandLandmarker.createFromOptions(arquivos, opcoes("GPU")); }
-    catch { detector = await HandLandmarker.createFromOptions(arquivos, opcoes("CPU")); }
+    try { detector = await HandLandmarker.createFromOptions(arquivos, opcoes("GPU")); delegado = "GPU"; }
+    catch { detector = await HandLandmarker.createFromOptions(arquivos, opcoes("CPU")); delegado = "CPU"; }
     status.textContent = "Abrindo a câmera…";
     video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
     await video.play();
     tela.width = video.videoWidth; tela.height = video.videoHeight;
+    const cfgVideo = video.srcObject.getVideoTracks()[0].getSettings();
+    infoCamera = (cfgVideo.width || tela.width) + "×" + (cfgVideo.height || tela.height) + (cfgVideo.frameRate ? " @" + Math.round(cfgVideo.frameRate) : "");
     botao.remove(); status.textContent = "";
     quadro();
   } catch (e) {
