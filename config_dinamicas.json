@@ -44,5 +44,7 @@
     "H",
     "Y",
     "X"
-  ]
+  ],
+  "pausaEstatica": 1.0,
+  "paradaPrevia": 0.25
 }

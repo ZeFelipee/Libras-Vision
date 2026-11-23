@@ -70,11 +70,12 @@ video.playsInline = true; video.muted = true;
 let texto = "", ultima = "", inicio = 0, detector, prever;
 
 // ---- letras com movimento (J, Z, K...): parâmetros e templates vêm de arquivos JSON ----
-const PADRAO = { limDtw: .15, limVel: .012, parado: .45, janelaPose: .6, pausaDinamica: 1, pausaDescarte: .5,
+const PADRAO = { limDtw: .15, limVel: .012, parado: .45, janelaPose: .6, pausaDinamica: 1, pausaDescarte: .5, pausaEstatica: 1, paradaPrevia: .25,
                  minPontos: 10, nPontos: 30, dinamicas: {}, pontos: {}, soDinamicas: [] };
 const PERDA_MAX = 400; // ms sem enxergar a mão antes de encerrar a gravação
 let CFG = PADRAO, TEMPLATES = {};
 let modo = "estatico", trajs = {}, anterior = null, ultimoMov = 0, ultimoIdx = 1, ultimoVisto = 0;
+let poseParada = null, paradoDesde = 0;
 let poseDin = null, tPose = 0, pausaAte = 0, aviso = "", tAviso = 0, statusAtual = "";
 
 // <svm> reimplementação do SVC (one-vs-one) do scikit-learn
@@ -183,7 +184,7 @@ function fimGravacao(agora) {
   } else {
     aviso = "Movimento não reconhecido (" + dtxt + ")"; pausaAte = agora + CFG.pausaDescarte * 1000;
   }
-  tAviso = agora; modo = "estatico"; poseDin = null; trajs = {}; ultima = "";
+  tAviso = agora; modo = "estatico"; poseDin = null; poseParada = null; trajs = {}; ultima = "";
 }
 
 function quadro() {
@@ -210,7 +211,15 @@ function quadro() {
 
       if (modo === "estatico") {
         letra = prever(normalizar(lm));
-        if (letra && temTemplates(letra)) { poseDin = letra; tPose = agora; } // pose que pode iniciar um movimento
+        // a pose só "arma" o movimento depois de a mão ficar quase parada nela por um instante;
+        // assim a mão passando por uma pose enquanto troca de sinal não dispara letra dinâmica
+        if (letra && temTemplates(letra)) {
+          if (CFG.paradaPrevia <= 0) { poseDin = letra; tPose = agora; }
+          else if (vel < CFG.limVel) {
+            if (poseParada !== letra) { poseParada = letra; paradoDesde = agora; }
+            if (agora - paradoDesde >= CFG.paradaPrevia * 1000) { poseDin = letra; tPose = agora; }
+          } else poseParada = null;
+        } else poseParada = null;
         if (poseDin && agora - tPose < CFG.janelaPose * 1000 && vel > CFG.limVel && agora >= pausaAte && anterior) {
           modo = "gravando"; trajs = {};
           for (const l in atual) trajs[l] = [anterior[l]];
@@ -241,7 +250,8 @@ function quadro() {
       if (prog >= 1) {
         texto += letraTimer; mostrarTexto();
         navigator.vibrate?.(60);
-        ultima = ""; // recomeça a contagem, como no script Python
+        ultima = ""; poseDin = null; poseParada = null;
+        pausaAte = agora + CFG.pausaEstatica * 1000; // intervalo antes do próximo sinal
       }
     }
 
